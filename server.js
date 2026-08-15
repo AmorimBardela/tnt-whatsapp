@@ -158,10 +158,16 @@ app.post('/send-message', async (req, res) => {
     }
 
     try {
-        const formattedJid = phone.includes('@s.whatsapp.net') ? phone : `${phone}@s.whatsapp.net`;
-        await sock.sendMessage(formattedJid, { text });
-        res.json({ success: true });
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        // Buscar o JID oficial no WhatsApp (resolve o 9º dígito do Brasil automaticamente)
+        const results = await sock.onWhatsApp(cleanPhone);
+        const jid = (results && results.length > 0) ? results[0].jid : `${cleanPhone}@s.whatsapp.net`;
+
+        await sock.sendMessage(jid, { text });
+        console.log(`✅ Mensagem enviada com sucesso para ${jid}: ${text}`);
+        res.json({ success: true, jid });
     } catch (err) {
+        console.error(`❌ Erro ao enviar mensagem para ${phone}:`, err.message);
         res.status(500).json({ success: false, message: err.message });
     }
 });
