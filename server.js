@@ -76,9 +76,11 @@ async function connectToWhatsApp() {
             if (msg.key.fromMe) continue;
 
             const remoteJid = msg.key.remoteJid;
-            if (!remoteJid || remoteJid.includes('@g.us')) continue;
+            if (!remoteJid || remoteJid.includes('@g.us') || remoteJid.includes('@lid')) continue;
 
-            const phone = remoteJid.replace('@s.whatsapp.net', '');
+            const phone = remoteJid.replace('@s.whatsapp.net', '').replace(/[^0-9]/g, '');
+            if (phone.length > 15 || phone.length < 8) continue;
+
             const pushName = msg.pushName || 'Cliente';
             const textMessage = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
 
