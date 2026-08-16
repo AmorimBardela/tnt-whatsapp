@@ -217,26 +217,18 @@ async function connectToWhatsApp() {
             const phone = targetJid.replace(/[^0-9]/g, '');
             if (phone.length < 8 || phone.length > 15) continue;
 
-            const textMessage = getMessageText(msg);
-            const pushName = msg.pushName || contactsMap.get(phone) || 'Cliente';
-            const timestamp = msg.messageTimestamp ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000);
-
-            if (msg.key.fromMe) {
-                // Mensagem enviada pelo nosso aparelho
-                console.log(`📤 Mensagem enviada para ${phone}: ${textMessage}`);
-                continue;
-            }
-
             if (!textMessage) continue;
 
-            console.log(`📩 Mensagem recebida de ${pushName} (${phone}): ${textMessage}`);
+            const isFromMe = !!msg.key.fromMe;
+            console.log(`📩 Mensagem (${isFromMe ? 'Enviada pelo Celular' : 'Recebida'}) ${pushName} (${phone}): ${textMessage}`);
 
             // Disparar Webhook para o PHP na Hostinger
             try {
                 const resp = await axios.post(WEBHOOK_URL, {
                     telefone: phone,
                     nome_contato: pushName,
-                    mensagem: textMessage
+                    mensagem: textMessage,
+                    fromMe: isFromMe
                 }, { timeout: 8000 });
                 console.log(`✅ Webhook entregue para ${phone}:`, resp.data);
             } catch (err) {
@@ -245,6 +237,34 @@ async function connectToWhatsApp() {
         }
     });
 }
+
+// Endpoint para reiniciar sessão e forçar novo QR Code com download de histórico
+const fs = require('fs');
+app.get('/reset-session', async (req, res) => {
+    try {
+        if (sock) {
+            try { await sock.logout(); } catch(e) {}
+            sock = null;
+        }
+        if (fs.existsSync('baileys_auth_info')) {
+            fs.rmSync('baileys_auth_info', { recursive: true, force: true });
+        }
+        latestQR = null;
+        connectionStatus = 'disconnected';
+        setTimeout(connectToWhatsApp, 1000);
+        res.send(`
+            <div style="font-family: sans-serif; text-align: center; padding: 50px; background: #0f172a; color: white; min-height: 100vh;">
+                <h1 style="color: #10b981;">🔄 Sessão Reiniciada!</h1>
+                <p style="color: #94a3b8; font-size: 16px;">O servidor vai gerar um novo QR Code para puxar o histórico completo do seu WhatsApp.</p>
+                <div style="margin-top: 30px;">
+                    <a href="/qr" style="background: #00a884; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold;">Escanear Novo QR Code 📱</a>
+                </div>
+            </div>
+        `);
+    } catch(err) {
+        res.status(500).send('Erro ao reiniciar sessão: ' + err.message);
+    }
+});
 
 // REST API Endpoints
 app.get('/status', (req, res) => {
