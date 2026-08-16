@@ -28,6 +28,10 @@ let sock = null;
 let latestQR = null;
 let connectionStatus = 'disconnected';
 
+// Cache em memória para chats e mensagens (espelhando o WhatsApp real)
+const chatCache = new Map();    // phone -> { phone, name, lastMessage, lastTimestamp, unreadCount }
+const messageCache = new Map(); // phone -> [{ fromMe, text, pushName, timestamp }]
+
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
     const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -73,8 +77,6 @@ async function connectToWhatsApp() {
         if (m.type !== 'notify') return;
 
         for (const msg of m.messages) {
-            if (msg.key.fromMe) continue;
-
             const remoteJid = msg.key.remoteJid;
             if (!remoteJid || remoteJid.includes('@g.us') || remoteJid.includes('@lid')) continue;
 
@@ -83,7 +85,33 @@ async function connectToWhatsApp() {
 
             const pushName = msg.pushName || 'Cliente';
             const textMessage = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+            const timestamp = msg.messageTimestamp || Math.floor(Date.now() / 1000);
 
+            // Atualizar cache de chats (tanto mensagens recebidas quanto enviadas)
+            const existing = chatCache.get(phone) || { phone, name: pushName, lastMessage: '', lastTimestamp: 0, unreadCount: 0 };
+            if (!msg.key.fromMe && pushName !== 'Cliente') existing.name = pushName;
+            if (textMessage) existing.lastMessage = textMessage;
+            existing.lastTimestamp = timestamp;
+            if (!msg.key.fromMe) existing.unreadCount = (existing.unreadCount || 0) + 1;
+            chatCache.set(phone, existing);
+
+            // Atualizar cache de mensagens
+            if (textMessage) {
+                if (!messageCache.has(phone)) messageCache.set(phone, []);
+                messageCache.get(phone).push({
+                    fromMe: msg.key.fromMe || false,
+                    text: textMessage,
+                    pushName: msg.key.fromMe ? 'TNT Game House' : pushName,
+                    timestamp
+                });
+                // Limitar a 200 mensagens por contato
+                if (messageCache.get(phone).length > 200) {
+                    messageCache.set(phone, messageCache.get(phone).slice(-200));
+                }
+            }
+
+            // Ignorar mensagens enviadas por nós para o webhook
+            if (msg.key.fromMe) continue;
             if (!textMessage) continue;
 
             console.log(`📩 Mensagem de ${pushName} (${phone}): ${textMessage}`);
@@ -167,11 +195,72 @@ app.post('/send-message', async (req, res) => {
 
         await sock.sendMessage(jid, { text });
         console.log(`✅ Mensagem enviada com sucesso para ${jid}: ${text}`);
+
+        // Registrar no cache de mensagens e chats
+        const now = Math.floor(Date.now() / 1000);
+        const existing = chatCache.get(cleanPhone) || { phone: cleanPhone, name: cleanPhone, lastMessage: '', lastTimestamp: 0, unreadCount: 0 };
+        existing.lastMessage = text;
+        existing.lastTimestamp = now;
+        chatCache.set(cleanPhone, existing);
+
+        if (!messageCache.has(cleanPhone)) messageCache.set(cleanPhone, []);
+        messageCache.get(cleanPhone).push({
+            fromMe: true,
+            text,
+            pushName: 'TNT Game House',
+            timestamp: now
+        });
+
         res.json({ success: true, jid });
     } catch (err) {
         console.error(`❌ Erro ao enviar mensagem para ${phone}:`, err.message);
         res.status(500).json({ success: false, message: err.message });
     }
+});
+
+// Endpoint para sincronizar chats do cache -> Banco PHP
+app.get('/sync-chats', async (req, res) => {
+    if (!sock || connectionStatus !== 'connected') {
+        return res.status(400).json({ success: false, message: 'WhatsApp não está conectado' });
+    }
+
+    const allChats = Array.from(chatCache.values());
+    let synced = 0;
+    let errors = 0;
+
+    for (const chat of allChats) {
+        try {
+            await axios.post(WEBHOOK_URL, {
+                telefone: chat.phone,
+                nome_contato: chat.name,
+                mensagem: chat.lastMessage || '[Sync] Conversa sincronizada'
+            });
+            synced++;
+        } catch (err) {
+            errors++;
+            console.error(`❌ Erro sync chat ${chat.phone}:`, err.message);
+        }
+    }
+
+    console.log(`📋 Sync completo: ${synced} chats sincronizados, ${errors} erros`);
+    res.json({ success: true, total: allChats.length, synced, errors, chats: allChats });
+});
+
+// Endpoint para listar chats direto do cache em memória
+app.get('/get-chats', (req, res) => {
+    const chats = Array.from(chatCache.values());
+    // Ordenar por última mensagem (mais recente primeiro)
+    chats.sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0));
+    res.json({ success: true, chats });
+});
+
+// Endpoint para buscar histórico de mensagens de um contato específico
+app.get('/get-messages/:phone', (req, res) => {
+    const phone = req.params.phone.replace(/[^0-9]/g, '');
+    const messages = messageCache.get(phone) || [];
+    // Ordenar cronologicamente
+    messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    res.json({ success: true, messages });
 });
 
 app.listen(PORT, HOST, () => {
