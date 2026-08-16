@@ -72,58 +72,78 @@ async function connectToWhatsApp() {
         }
     });
 
+    // Helper para extrair texto de qualquer formato de mensagem do WhatsApp
+    function getMessageText(msg) {
+        if (!msg || !msg.message) return '';
+        const m = msg.message;
+        return m.conversation 
+            || m.extendedTextMessage?.text 
+            || m.imageMessage?.caption 
+            || m.videoMessage?.caption 
+            || m.documentMessage?.caption 
+            || m.ephemeralMessage?.message?.extendedTextMessage?.text
+            || m.ephemeralMessage?.message?.conversation
+            || m.viewOnceMessage?.message?.conversation
+            || m.viewOnceMessage?.message?.extendedTextMessage?.text
+            || m.viewOnceMessageV2?.message?.conversation
+            || m.viewOnceMessageV2?.message?.extendedTextMessage?.text
+            || '';
+    }
+
     // Recebimento de mensagens em tempo real
     sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify') return;
+        if (!m.messages || !Array.isArray(m.messages)) return;
 
         for (const msg of m.messages) {
-            const remoteJid = msg.key.remoteJid;
-            if (!remoteJid || remoteJid.includes('@g.us') || remoteJid.includes('@lid')) continue;
+            // Ignorar mensagens de grupos
+            const rawJid = msg.key.remoteJid || '';
+            if (rawJid.includes('@g.us')) continue;
 
-            const phone = remoteJid.replace('@s.whatsapp.net', '').replace(/[^0-9]/g, '');
-            if (phone.length > 15 || phone.length < 8) continue;
-
-            const pushName = msg.pushName || 'Cliente';
-            const textMessage = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
-            const timestamp = msg.messageTimestamp || Math.floor(Date.now() / 1000);
-
-            // Atualizar cache de chats (tanto mensagens recebidas quanto enviadas)
-            const existing = chatCache.get(phone) || { phone, name: pushName, lastMessage: '', lastTimestamp: 0, unreadCount: 0 };
-            if (!msg.key.fromMe && pushName !== 'Cliente') existing.name = pushName;
-            if (textMessage) existing.lastMessage = textMessage;
-            existing.lastTimestamp = timestamp;
-            if (!msg.key.fromMe) existing.unreadCount = (existing.unreadCount || 0) + 1;
-            chatCache.set(phone, existing);
-
-            // Atualizar cache de mensagens
-            if (textMessage) {
-                if (!messageCache.has(phone)) messageCache.set(phone, []);
-                messageCache.get(phone).push({
-                    fromMe: msg.key.fromMe || false,
-                    text: textMessage,
-                    pushName: msg.key.fromMe ? 'TNT Game House' : pushName,
-                    timestamp
-                });
-                // Limitar a 200 mensagens por contato
-                if (messageCache.get(phone).length > 200) {
-                    messageCache.set(phone, messageCache.get(phone).slice(-200));
-                }
+            // Extrair telefone do remetente
+            let targetJid = rawJid;
+            if (rawJid.includes('@lid') && msg.key.participant) {
+                targetJid = msg.key.participant;
             }
 
-            // Ignorar mensagens enviadas por nós para o webhook
-            if (msg.key.fromMe) continue;
+            const phone = targetJid.replace(/[^0-9]/g, '');
+            if (phone.length < 8 || phone.length > 15) continue;
+
+            const pushName = msg.pushName || 'Cliente';
+            const textMessage = getMessageText(msg);
+            const timestamp = msg.messageTimestamp || Math.floor(Date.now() / 1000);
+
+            // Se for mensagem nossa enviada pelo celular ou outro dispositivo
+            if (msg.key.fromMe) {
+                // Atualizar cache de conversa enviada
+                const existing = chatCache.get(phone) || { phone, name: phone, lastMessage: '', lastTimestamp: 0, unreadCount: 0 };
+                if (textMessage) existing.lastMessage = textMessage;
+                existing.lastTimestamp = timestamp;
+                chatCache.set(phone, existing);
+                continue;
+            }
+
             if (!textMessage) continue;
 
-            console.log(`📩 Mensagem de ${pushName} (${phone}): ${textMessage}`);
+            console.log(`📩 Mensagem recebida de ${pushName} (${phone}): ${textMessage}`);
 
+            // Atualizar cache
+            const existing = chatCache.get(phone) || { phone, name: pushName, lastMessage: '', lastTimestamp: 0, unreadCount: 0 };
+            if (pushName !== 'Cliente') existing.name = pushName;
+            existing.lastMessage = textMessage;
+            existing.lastTimestamp = timestamp;
+            existing.unreadCount = (existing.unreadCount || 0) + 1;
+            chatCache.set(phone, existing);
+
+            // Disparar Webhook para o PHP na Hostinger
             try {
-                await axios.post(WEBHOOK_URL, {
+                const resp = await axios.post(WEBHOOK_URL, {
                     telefone: phone,
                     nome_contato: pushName,
                     mensagem: textMessage
-                });
+                }, { timeout: 8000 });
+                console.log(`✅ Webhook entregue com sucesso para ${phone}:`, resp.data);
             } catch (err) {
-                console.error('❌ Erro no Webhook:', err.message);
+                console.error(`❌ Erro ao enviar Webhook para ${phone}:`, err.message);
             }
         }
     });
